@@ -1,0 +1,90 @@
+{
+  "name": "@autoremesher/wasm",
+  "version": "0.2.0",
+  "description": "Automatic quad remeshing (AutoRemesher) compiled to WebAssembly, with a TypeScript-first API for Three.js, glTF, OBJ, and raw buffers.",
+  "keywords": [
+    "remesh",
+    "quad",
+    "retopology",
+    "mesh",
+    "wasm",
+    "webassembly",
+    "3d",
+    "threejs",
+    "gltf",
+    "geometry-processing"
+  ],
+  "license": "MIT",
+  "author": "Sarah Yung <sarahyung3d@gmail.com>",
+  "homepage": "https://github.com/imsarah/autoremesher-wasm#readme",
+  "bugs": {
+    "url": "https://github.com/imsarah/autoremesher-wasm/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imsarah/autoremesher-wasm.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./lib/cjs/index.js",
+  "module": "./lib/esm/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "import": "./lib/esm/index.js",
+      "require": "./lib/cjs/index.js"
+    },
+    "./three": {
+      "types": "./lib/types/three.d.ts",
+      "import": "./lib/esm/three.js",
+      "require": "./lib/cjs/three.js"
+    },
+    "./wasm/autoremesher.mjs": "./wasm/autoremesher.mjs",
+    "./wasm/autoremesher.wasm": "./wasm/autoremesher.wasm",
+    "./wasm/autoremesher-mt.mjs": "./wasm/autoremesher-mt.mjs",
+    "./wasm/autoremesher-mt.wasm": "./wasm/autoremesher-mt.wasm",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "files": [
+    "lib",
+    "wasm/autoremesher.mjs",
+    "wasm/autoremesher.wasm",
+    "wasm/autoremesher-mt.mjs",
+    "wasm/autoremesher-mt.wasm",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "npm run build:wasm && npm run build:ts",
+    "build:wasm": "bash emscripten/build.sh",
+    "build:ts": "tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/postbuild.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "demo": "npm run dev --prefix examples/web",
+    "demo:install": "npm install --prefix examples/web",
+    "prepublishOnly": "npm run build:ts && npm test"
+  },
+  "peerDependencies": {
+    "three": ">=0.150.0"
+  },
+  "peerDependenciesMeta": {
+    "three": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/three": "^0.185.1",
+    "three": "^0.185.1",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "meshoptimizer": "^1.2.0"
+  }
+}

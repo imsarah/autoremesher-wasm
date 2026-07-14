@@ -1,0 +1,534 @@
+name: release
+
+on:
+  push:
+    branches:
+      - master
+      - ci
+    tags:
+      - '*'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage-upload:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          aqtversion: '==3.3.*'
+          version: '5.15.2'
+          host: 'linux'
+          target: 'desktop'
+          archives: 'qttools qtsvg qtimageformats qtbase qtmultimedia icu'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtbb-dev libgl1-mesa-dev libfuse2 libfontconfig1
+      - name: Build application
+        run: |
+          qmake
+          make -j`nproc`
+      - name: Generate AppImage
+        run: |
+          set -e
+          # Download AppImage tools from official upstream releases
+          LINUXDEPLOYQT_URL="https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage"
+          APPIMAGETOOL_URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          wget --no-verbose -O ./ci/linuxdeployqt.AppImage "$LINUXDEPLOYQT_URL"
+          wget --no-verbose -O ./ci/appimagetool.AppImage "$APPIMAGETOOL_URL"
+
+          # Create directories
+          mkdir -p appdir/usr/share/metainfo
+          mkdir -p appdir/usr/share/applications
+          mkdir -p appdir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p appdir/usr/bin
+          mkdir -p appdir/usr/optional/libstdc++
+
+          # Copy libstdc++
+          cp /usr/lib/x86_64-linux-gnu/libstdc++.so.6 appdir/usr/optional/libstdc++/libstdc++.so.6
+
+          # Copy fontconfig (required for Qt xcb plugin)
+          if [ -f /usr/lib/x86_64-linux-gnu/libfontconfig.so.1 ]; then
+            mkdir -p appdir/usr/lib
+            cp /usr/lib/x86_64-linux-gnu/libfontconfig.so.1 appdir/usr/lib/
+            cp /usr/lib/x86_64-linux-gnu/libfreetype.so.6 appdir/usr/lib/ 2>/dev/null || true
+          fi
+
+          # Copy application related files
+          cp ${GITHUB_WORKSPACE}/ci/autoremesher.png appdir/usr/share/icons/hicolor/256x256/apps/autoremesher.png
+          cp ${GITHUB_WORKSPACE}/ci/autoremesher.appdata.xml appdir/usr/share/metainfo/autoremesher.appdata.xml
+          cp ${GITHUB_WORKSPACE}/ci/autoremesher.desktop appdir/usr/share/applications/autoremesher.desktop
+          cp ${GITHUB_WORKSPACE}/autoremesher appdir/usr/bin/autoremesher
+          chmod a+x appdir/usr/bin/autoremesher
+
+          # Verify binary was copied
+          if [ ! -f appdir/usr/bin/autoremesher ]; then
+            echo "ERROR: Binary not found at appdir/usr/bin/autoremesher"
+            exit 1
+          fi
+          if [ ! -x appdir/usr/bin/autoremesher ]; then
+            echo "ERROR: Binary is not executable at appdir/usr/bin/autoremesher"
+            exit 1
+          fi
+          echo "✓ Binary found at appdir/usr/bin/autoremesher"
+          ls -lh appdir/usr/bin/autoremesher
+
+          # Make bundle
+          chmod a+x ./ci/linuxdeployqt.AppImage
+          chmod a+x ./ci/appimagetool.AppImage
+          unset QTDIR; unset QT_PLUGIN_PATH
+
+          # Run linuxdeployqt on the desktop file to bundle non-Qt libs
+          ./ci/linuxdeployqt.AppImage appdir/usr/share/applications/autoremesher.desktop -bundle-non-qt-libs -verbose=2
+
+          # Verify binary still exists after linuxdeployqt
+          if [ ! -f appdir/usr/bin/autoremesher ]; then
+            echo "ERROR: Binary was removed by linuxdeployqt"
+            find appdir -type f -name "autoremesher*" | head -20
+            exit 1
+          fi
+          echo "✓ Binary still present after linuxdeployqt at appdir/usr/bin/autoremesher"
+
+          # Verify desktop file and icon are in place
+          if [ ! -f appdir/usr/share/applications/autoremesher.desktop ]; then
+            echo "ERROR: Desktop file missing"
+            exit 1
+          fi
+          echo "✓ Desktop file present"
+
+          if [ ! -f appdir/usr/share/icons/hicolor/256x256/apps/autoremesher.png ]; then
+            echo "ERROR: Icon missing"
+            exit 1
+          fi
+          echo "✓ Icon present"
+
+          # Verify no duplicate paths
+          if find appdir -path "*/usr/bin/usr/bin/*" 2>/dev/null | grep -q .; then
+            echo "ERROR: Duplicate path structure detected (usr/bin/usr/bin/)"
+            find appdir -path "*/usr/bin/usr/bin/*"
+            exit 1
+          fi
+          echo "✓ No duplicate paths detected"
+
+          # Verify AppRun created by linuxdeployqt
+          if [ ! -x appdir/AppRun ]; then
+            echo "ERROR: AppRun missing or not executable after linuxdeployqt"
+            exit 1
+          fi
+          echo "✓ AppRun present"
+
+          # Remove problematic DRI libs that can cause graphics conflicts
+          rm -f "./appdir/usr/lib/libxcb-dri2.so" "./appdir/usr/lib/libxcb-dri3.so"
+
+          # Create AppImage with appimagetool
+          echo "Creating AppImage..."
+          export ARCH=x86_64
+          export VERSION="${VERSION:-debug}"
+          ./ci/appimagetool.AppImage -g ./appdir/ AutoRemesher-x86_64.AppImage
+
+          # Verify AppImage was created
+          if [ ! -f AutoRemesher-x86_64.AppImage ]; then
+            echo "ERROR: AppImage creation failed"
+            exit 1
+          fi
+          echo "✓ AppImage created successfully"
+          file AutoRemesher-x86_64.AppImage
+
+          mv AutoRemesher-x86_64.AppImage autoremesher-${{ github.ref_name }}.AppImage
+      - name: Checkout test models
+        uses: actions/checkout@v4
+        with:
+          repository: alecjacobson/common-3d-test-models
+          path: test-models
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb imagemagick
+      - name: Run CLI test with armadillo.obj
+        run: |
+          set -e
+          chmod +x autoremesher-${{ github.ref_name }}.AppImage
+          export DISPLAY=:99
+          export XDG_RUNTIME_DIR=/tmp/runtime-root
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+
+          Xvfb :99 -screen 0 1280x720x24 > /dev/null 2>&1 &
+          XVFB_PID=$!
+          sleep 2
+
+          echo "Running CLI test..."
+          ./autoremesher-${{ github.ref_name }}.AppImage \
+            --input test-models/data/armadillo.obj \
+            --output autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed.obj \
+            --report autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed_report.txt \
+            --target-quads 50000 \
+            --edge-scaling 1.0 \
+            --sharp-edge 90.0 \
+            --smooth-normal 0.0 \
+            --adaptivity 1.0 \
+            > cli-test-output.txt 2>&1
+
+          APP_EXIT_CODE=$?
+          echo "--- CLI Test Output ---"
+          cat cli-test-output.txt
+          echo "---"
+
+          if [ $APP_EXIT_CODE -ne 0 ]; then
+            echo "ERROR: CLI test failed with exit code $APP_EXIT_CODE"
+            exit 1
+          fi
+
+          if [ ! -f autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed.obj ]; then
+            echo "ERROR: Output file autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed.obj was not created"
+            exit 1
+          fi
+
+          echo "✓ CLI test passed: remeshed .obj created"
+          ls -lh autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed.obj
+
+          kill $XVFB_PID 2>/dev/null || true
+      - name: Upload CLI test result
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed.obj
+          path: autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed.obj
+      - name: Upload CLI test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed_report.txt
+          path: autoremesher-${{ github.ref_name }}-ubuntu-22.04-remeshed_report.txt
+      - name: Run AppImage and capture screenshot
+        run: |
+          set +e
+          chmod +x autoremesher-${{ github.ref_name }}.AppImage
+          export DISPLAY=:99
+          export XDG_RUNTIME_DIR=/tmp/runtime-root
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+
+          Xvfb :99 -screen 0 1280x720x24 > /dev/null 2>&1 &
+          XVFB_PID=$!
+          sleep 2
+
+          timeout 12s ./autoremesher-${{ github.ref_name }}.AppImage > app-run-ubuntu.log 2>&1 &
+          APP_PID=$!
+          sleep 8
+
+          import -display :99 -window root autoremesher-${{ github.ref_name }}-ubuntu-22.04.png || true
+
+          wait $APP_PID || true
+          kill $APP_PID 2>/dev/null || true
+          kill $XVFB_PID 2>/dev/null || true
+      - name: Upload AppImage screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-ubuntu-22.04.png
+          path: autoremesher-${{ github.ref_name }}-ubuntu-22.04.png
+      - name: Upload Linux AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}.AppImage
+          path: autoremesher-${{ github.ref_name }}.AppImage
+
+  win32-msvc-upload:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Visual Studio shell
+        uses: egor-tensin/vs-shell@v2
+        with:
+          arch: x64
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          aqtversion: '==2.1.*'
+          version: '5.15.2'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2019_64'
+          archives: 'qttools qtsvg qtimageformats qtbase qtmultimedia qtwinextras opengl32sw'
+      - name: Build TBB
+        run: |
+          cd $env:GITHUB_WORKSPACE\thirdparty\tbb
+          cmake -B build2 -DTBB_BUILD_SHARED=ON -DTBB_BUILD_STATIC=OFF -DTBB_BUILD_TBBMALLOC=OFF -DTBB_BUILD_TBBMALLOC_PROXY=OFF -DTBB_BUILD_TESTS=OFF
+          cmake --build build2 --config Release
+      - name: Build application
+        run: |
+          cd $env:GITHUB_WORKSPACE
+          qmake -spec win32-msvc
+          set CL=/MP
+          nmake -f Makefile.Release
+      - name: Deploy Qt dependencies
+        run: |
+          windeployqt release/autoremesher.exe --no-translations --release
+        shell: bash
+      - name: Copy TBB DLL
+        shell: bash
+        run: |
+          cp thirdparty/tbb/build2/Release/tbb.dll release/
+      - name: Copy offscreen platform plugin and opengl32sw
+        shell: bash
+        run: |
+          cp "$Qt5_Dir/plugins/platforms/qoffscreen.dll" release/platforms/
+          cp "$Qt5_Dir/bin/opengl32sw.dll" release/
+      - name: Set environment variable
+        run: |
+          set PATH="%PATH%;C:\Program Files\7-Zip"
+      - name: Package executable
+        shell: bash
+        run: |
+          cd release
+          # Main executable
+          7z a ../autoremesher-${{ github.ref_name }}-win32-x86_64.zip autoremesher.exe
+          # Plugin directories — pass the directory name (not dir\*) so structure is preserved
+          for dir in platforms imageformats styles translations; do
+            if [ -d "$dir" ]; then
+              7z a ../autoremesher-${{ github.ref_name }}-win32-x86_64.zip "$dir"
+            fi
+          done
+          # All root-level DLLs (Qt + TBB + opengl32sw + ANGLE)
+          for f in *.dll; do
+            if [ -f "$f" ]; then
+              7z a ../autoremesher-${{ github.ref_name }}-win32-x86_64.zip "$f"
+            fi
+          done
+          cd ..
+          # VC++ runtime DLLs (required on systems without the redistributable installed)
+          CRT_DIR=$(ls -d "${VCToolsRedistDir}x64"/Microsoft.VC*.CRT 2>/dev/null | head -1)
+          if [ -n "$CRT_DIR" ]; then
+            7z a autoremesher-${{ github.ref_name }}-win32-x86_64.zip "${CRT_DIR}/msvcp140.dll"
+            7z a autoremesher-${{ github.ref_name }}-win32-x86_64.zip "${CRT_DIR}/vcruntime140.dll"
+            # msvcp140_1.dll and vcruntime140_1.dll may not exist in all toolset versions
+            [ -f "${CRT_DIR}/msvcp140_1.dll" ] && 7z a autoremesher-${{ github.ref_name }}-win32-x86_64.zip "${CRT_DIR}/msvcp140_1.dll" || true
+            [ -f "${CRT_DIR}/vcruntime140_1.dll" ] && 7z a autoremesher-${{ github.ref_name }}-win32-x86_64.zip "${CRT_DIR}/vcruntime140_1.dll" || true
+          fi
+          7z l autoremesher-${{ github.ref_name }}-win32-x86_64.zip
+      - name: Checkout test models
+        uses: actions/checkout@v4
+        with:
+          repository: alecjacobson/common-3d-test-models
+          path: test-models
+      - name: Extract release zip to test directory
+        shell: bash
+        run: |
+          ZIP_FILE="autoremesher-${{ github.ref_name }}-win32-x86_64.zip"
+          TEST_DIR="$GITHUB_WORKSPACE/test_release"
+          mkdir -p "$TEST_DIR"
+          7z x "$GITHUB_WORKSPACE/$ZIP_FILE" -o"$TEST_DIR" -y
+          echo "Extracted release zip to $TEST_DIR:"
+          ls -la "$TEST_DIR"
+      - name: Run CLI test with armadillo.obj (from release zip)
+        timeout-minutes: 30
+        run: |
+          set -e
+          export QT_OPENGL=software
+          export QT_QPA_PLATFORM=offscreen
+
+          outputFile="autoremesher-${{ github.ref_name }}-windows-2022-remeshed.obj"
+          reportFile="autoremesher-${{ github.ref_name }}-windows-2022-remeshed_report.txt"
+          logFile="$GITHUB_WORKSPACE/cli-test-output.txt"
+          TEST_EXE="$GITHUB_WORKSPACE/test_release/autoremesher.exe"
+
+          if [ ! -f "$TEST_EXE" ]; then
+            echo "ERROR: Release exe not found at $TEST_EXE"
+            ls -la "$GITHUB_WORKSPACE/test_release/"
+            exit 1
+          fi
+          echo "Testing against release zip version: $TEST_EXE"
+
+          echo "Running CLI test..."
+          "$TEST_EXE" \
+            --input test-models/data/armadillo.obj \
+            --output "$outputFile" \
+            --report "$reportFile" \
+            --target-quads 50000 \
+            --edge-scaling 1.0 \
+            --sharp-edge 90.0 \
+            --smooth-normal 0.0 \
+            --adaptivity 1.0 \
+            > "$logFile" 2>&1
+
+          echo "--- CLI Test Output ---"
+          cat "$logFile"
+          echo "---"
+
+          if [ ! -f "$GITHUB_WORKSPACE/$outputFile" ]; then
+            echo "ERROR: Output file $outputFile was not created"
+            ls -la "$GITHUB_WORKSPACE/"
+            exit 1
+          fi
+          echo "OK. CLI test passed: $outputFile created"
+        shell: bash
+      - name: Upload CLI test result
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-windows-2022-remeshed.obj
+          path: autoremesher-${{ github.ref_name }}-windows-2022-remeshed.obj
+      - name: Upload CLI test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-windows-2022-remeshed_report.txt
+          path: autoremesher-${{ github.ref_name }}-windows-2022-remeshed_report.txt
+      - name: Run application and capture screenshot (from release zip)
+        timeout-minutes: 3
+        run: |
+          $testDir = "$env:GITHUB_WORKSPACE\test_release"
+          if (-not (Test-Path "$testDir\autoremesher.exe")) {
+            Write-Error "ERROR: Release exe not found at $testDir\autoremesher.exe"
+            exit 1
+          }
+          Write-Host "Testing against release zip version: $testDir\autoremesher.exe"
+
+          $env:QT_OPENGL = 'software'
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          Start-Process -FilePath "$testDir\autoremesher.exe"
+          Start-Sleep -Seconds 12
+          Add-Type -AssemblyName System.Windows.Forms
+          $bitmap = [System.Drawing.Bitmap]::new([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height)
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+          $graphics.CopyFromScreen(0, 0, 0, 0, $bitmap.Size)
+          $bitmap.Save("$env:GITHUB_WORKSPACE\autoremesher-${{ github.ref_name }}-windows-2022.png")
+          Stop-Process -Name autoremesher -Force -ErrorAction SilentlyContinue
+        shell: powershell
+      - name: Upload Windows screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-windows-2022.png
+          path: autoremesher-${{ github.ref_name }}-windows-2022.png
+      - name: Upload Windows zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-win32-x86_64.zip
+          path: autoremesher-${{ github.ref_name }}-win32-x86_64.zip
+
+  macos-upload:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        run: |
+          HOMEBREW_VERBOSE_USING_DOTS=1 brew reinstall --verbose qt@5
+          HOMEBREW_VERBOSE_USING_DOTS=1 brew link qt@5 --force
+      - name: Install TBB
+        run: |
+          brew install tbb
+      - name: Install create-dmg
+        run: |
+          brew install create-dmg
+      - name: Build application
+        run: |
+          export PATH="/usr/local/opt/qt@5/bin:$PATH"
+          qmake CONFIG+=sdk_no_version_check
+          CPU_COUNT=$(sysctl -n hw.logicalcpu)
+          make -j${CPU_COUNT}
+      - name: Generate DMG
+        run: |
+          export PATH="/usr/local/opt/qt@5/bin:$PATH"
+          # deploy Qt frameworks into the app bundle
+          macdeployqt ${GITHUB_WORKSPACE}/autoremesher.app
+          # ad-hoc sign so Gatekeeper doesn't report the app as damaged
+          codesign --force --deep --sign - ${GITHUB_WORKSPACE}/autoremesher.app
+          # prepare a staging folder containing the app bundle
+          STAGING_DIR=$(mktemp -d)
+          cp -R "${GITHUB_WORKSPACE}/autoremesher.app" "${STAGING_DIR}/"
+          # package into drag-to-Applications DMG
+          create-dmg \
+            --volname "AutoRemesher" \
+            --format UDZO \
+            --app-drop-link 520 145 \
+            --window-size 660 300 \
+            --icon "autoremesher.app" 140 145 \
+            --icon "Applications" 520 145 \
+            "${GITHUB_WORKSPACE}/autoremesher-${{ github.ref_name }}.dmg" \
+            "${STAGING_DIR}"
+          rm -rf "${STAGING_DIR}"
+      - name: Mount DMG for testing
+        run: |
+          DMG_PATH="${GITHUB_WORKSPACE}/autoremesher-${{ github.ref_name }}.dmg"
+          if [ ! -f "$DMG_PATH" ]; then
+            echo "ERROR: DMG not found at $DMG_PATH"
+            ls -la "${GITHUB_WORKSPACE}/"
+            exit 1
+          fi
+          echo "Mounting DMG: $DMG_PATH"
+          hdiutil attach "$DMG_PATH" -mountpoint /Volumes/AutoRemesher -nobrowse -verbose
+          echo "DMG mounted at /Volumes/AutoRemesher"
+          ls -la /Volumes/AutoRemesher/
+      - name: Checkout test models
+        uses: actions/checkout@v4
+        with:
+          repository: alecjacobson/common-3d-test-models
+          path: test-models
+      - name: Run CLI test with armadillo.obj (from DMG)
+        run: |
+          set -e
+          DMG_APP="/Volumes/AutoRemesher/autoremesher.app"
+          echo "Running CLI test from DMG: $DMG_APP"
+
+          if [ ! -d "$DMG_APP" ]; then
+            echo "ERROR: App bundle not found in DMG at $DMG_APP"
+            ls -la /Volumes/AutoRemesher/
+            hdiutil detach /Volumes/AutoRemesher -force || true
+            exit 1
+          fi
+
+          "$DMG_APP/Contents/MacOS/autoremesher" \
+            --input test-models/data/armadillo.obj \
+            --output autoremesher-${{ github.ref_name }}-macos-latest-remeshed.obj \
+            --report autoremesher-${{ github.ref_name }}-macos-latest-remeshed_report.txt \
+            --target-quads 50000 \
+            --edge-scaling 1.0 \
+            --sharp-edge 90.0 \
+            --smooth-normal 0.0 \
+            --adaptivity 1.0
+
+          if [ ! -f autoremesher-${{ github.ref_name }}-macos-latest-remeshed.obj ]; then
+            echo "ERROR: Output file was not created"
+            hdiutil detach /Volumes/AutoRemesher -force || true
+            exit 1
+          fi
+          echo "✓ CLI test passed: remeshed .obj created"
+          ls -lh autoremesher-${{ github.ref_name }}-macos-latest-remeshed.obj
+      - name: Upload CLI test result
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-macos-latest-remeshed.obj
+          path: autoremesher-${{ github.ref_name }}-macos-latest-remeshed.obj
+      - name: Upload CLI test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-macos-latest-remeshed_report.txt
+          path: autoremesher-${{ github.ref_name }}-macos-latest-remeshed_report.txt
+      - name: Run application and capture screenshot (from DMG)
+        run: |
+          DMG_APP="/Volumes/AutoRemesher/autoremesher.app"
+          if [ ! -d "$DMG_APP" ]; then
+            echo "ERROR: App bundle not found in DMG at $DMG_APP"
+            exit 1
+          fi
+          echo "Running GUI test from DMG: $DMG_APP"
+
+          open "$DMG_APP"
+          sleep 12
+          screencapture autoremesher-${{ github.ref_name }}-macos-latest.png || true
+          killall autoremesher || true
+      - name: Detach DMG
+        if: always()
+        run: |
+          hdiutil detach /Volumes/AutoRemesher -force || echo "Note: DMG detach completed (or was not mounted)"
+      - name: Upload macOS screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}-macos-latest.png
+          path: autoremesher-${{ github.ref_name }}-macos-latest.png
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoremesher-${{ github.ref_name }}.dmg
+          path: autoremesher-${{ github.ref_name }}.dmg

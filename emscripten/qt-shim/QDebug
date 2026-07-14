@@ -1,0 +1,54 @@
+/*
+ * Minimal drop-in replacement for Qt's <QDebug> used by the
+ * AutoRemesher core (qDebug() stream logging only).
+ *
+ * Buffers one statement and flushes it to stderr with a newline,
+ * mirroring qDebug's line-per-statement behaviour.
+ */
+#ifndef AUTOREMESHER_WASM_QDEBUG_SHIM
+#define AUTOREMESHER_WASM_QDEBUG_SHIM
+
+#include <iostream>
+#include <sstream>
+#include <string>
+
+class QDebug {
+public:
+    QDebug() = default;
+    QDebug(const QDebug&) = delete;
+    QDebug& operator=(const QDebug&) = delete;
+    QDebug(QDebug&& other) noexcept
+        : m_stream(std::move(other.m_stream))
+    {
+        other.m_moved = true;
+    }
+
+    ~QDebug()
+    {
+        if (!m_moved) {
+            const std::string line = m_stream.str();
+            if (!line.empty())
+                std::cerr << line << std::endl;
+        }
+    }
+
+    template <typename T>
+    QDebug& operator<<(const T& value)
+    {
+        if (m_stream.tellp() > 0)
+            m_stream << ' ';
+        m_stream << value;
+        return *this;
+    }
+
+private:
+    std::ostringstream m_stream;
+    bool m_moved = false;
+};
+
+inline QDebug qDebug()
+{
+    return QDebug();
+}
+
+#endif

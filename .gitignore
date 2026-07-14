@@ -1,0 +1,21 @@
+# The app-level .gitignore may exclude *.md repo-wide; docs belong here.
+!*.md
+
+# lib/ (tsc) and wasm/ (Emscripten) ARE committed so consumers can install
+# without the Emscripten SDK. Rebuild with `npm run build`.
+build-wasm/
+build-wasm-dbg/
+node_modules/
+*.tsbuildinfo
+
+# Local experiments — do not publish to GitHub
+*.stl
+*.log
+test-out-*
+debug-*.log
+.DS_Store
+.grok/
+
+# Browser demo (Vite)
+examples/web/node_modules/
+examples/web/dist/

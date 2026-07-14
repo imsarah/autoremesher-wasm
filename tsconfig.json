@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM"],
+    "strict": true,
+    "declaration": false,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "module": "ESNext",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}
