@@ -12,12 +12,11 @@ export interface MeshData {
 export const ACCEPTED_FILES = ".glb,.gltf,.fbx,.obj,.stl";
 
 /**
- * Sample UV sphere: radius 0.5, 32×24 segments (common editor default).
- * Indexed topology is preserved for the source wireframe preview.
- * Degenerate pole triangles are stripped only when sending to remesh().
+ * Sample torus knot (closed organic curve). Indexed topology is preserved
+ * for the source wireframe preview.
  */
-export function makeAdvancedEditorSphere(): MeshData {
-    const geometry = new THREE.SphereGeometry(0.5, 32, 24);
+export function makeTorusKnotSample(): MeshData {
+    const geometry = new THREE.TorusKnotGeometry(0.5, 0.16, 128, 24);
     try {
         return geometryToMeshPreserveTopology(geometry);
     } finally {
@@ -25,9 +24,9 @@ export function makeAdvancedEditorSphere(): MeshData {
     }
 }
 
-/** Backwards-compatible sample name. */
+/** Default playground sample. */
 export function makeSample(): MeshData {
-    return makeAdvancedEditorSphere();
+    return makeTorusKnotSample();
 }
 
 export async function readMeshFile(file: File): Promise<MeshData> {

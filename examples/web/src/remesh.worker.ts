@@ -39,11 +39,31 @@ self.onmessage = async (event: MessageEvent<RequestMessage>) => {
         if (type === "decimate") {
             if (!event.data.maxTriangles || event.data.maxTriangles < 1)
                 throw new Error("Choose a valid polygon target.");
-            self.postMessage({ id, type: "progress", progress: 0.05, status: "Preparing simplifier…" });
+            const fromTris = indices.length / 3;
+            const budget = event.data.maxTriangles;
+            self.postMessage({
+                id,
+                type: "progress",
+                progress: 0.08,
+                status: `Loading simplifier (${fromTris.toLocaleString()} tris)…`,
+            });
             await ensureDecimatorReady();
-            self.postMessage({ id, type: "progress", progress: 0.2, status: "Reducing mesh…" });
-            const reduced = decimateToTriangleBudget(vertices, indices, event.data.maxTriangles);
-            self.postMessage({ id, type: "progress", progress: 1, status: "Pre-decimate complete" });
+            self.postMessage({
+                id,
+                type: "progress",
+                progress: 0.25,
+                status: `Edge-collapse → ${budget.toLocaleString()} tris…`,
+            });
+            const reduced = decimateToTriangleBudget(vertices, indices, budget);
+            const pct = reduced.fromTriangles > 0
+                ? Math.round((1 - reduced.toTriangles / reduced.fromTriangles) * 100)
+                : 0;
+            self.postMessage({
+                id,
+                type: "progress",
+                progress: 1,
+                status: `Done (−${pct}%, ${reduced.method})`,
+            });
             const transfer: Transferable[] = [
                 reduced.vertices.buffer,
                 reduced.indices.buffer,

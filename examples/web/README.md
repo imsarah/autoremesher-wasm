@@ -20,7 +20,7 @@ Open http://localhost:5173
 
 ## Features
 
-- Sphere sample + upload (GLB / glTF / FBX / OBJ / STL)
+- Torus-knot sample + upload (GLB / glTF / FBX / OBJ / STL)
 - Pre-decimate large meshes in a worker
 - Remesh via `@autoremesher/wasm` (single-thread, deterministic)
 - Original / quads view, download OBJ

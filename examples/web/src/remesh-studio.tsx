@@ -5,7 +5,7 @@ import * as THREE from "three";
 
 import {
     ACCEPTED_FILES,
-    makeAdvancedEditorSphere,
+    makeTorusKnotSample,
     normalizeMesh,
     prepareMeshForRemesh,
     readMeshFile,
@@ -38,8 +38,53 @@ type WorkerMessage =
     | { id: number; type: "error"; message: string };
 
 const MAX_TARGET = 5000;
-const DECIMATE_PRESETS = [10000, 25000, 50000, 100000, 250000, 500000];
+const GITHUB_REPO_URL = "https://github.com/imsarah/autoremesher-wasm";
+/** Soft ceiling: remesh is practical below this without an extra pre-pass. */
+const REMESH_COMFORT_TRIS = 40_000;
+/** Strongly recommend pre-decimate above this. */
+const REMESH_HEAVY_TRIS = 120_000;
+const DECIMATE_PRESETS = [
+    { value: 8_000, label: "Light", hint: "fast remesh" },
+    { value: 15_000, label: "Balanced", hint: "good default" },
+    { value: 25_000, label: "Detail", hint: "more shape" },
+    { value: 50_000, label: "Heavy", hint: "large uploads" },
+    { value: 100_000, label: "Max", hint: "multi‑M meshes" },
+    { value: 250_000, label: "Ultra", hint: "keep density" },
+] as const;
 const MAX_SOURCE_WIREFRAME_TRIANGLES = 100000;
+
+function formatTris(n: number): string {
+    if (n >= 1_000_000)
+        return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+    if (n >= 10_000)
+        return `${Math.round(n / 1000)}k`;
+    return n.toLocaleString();
+}
+
+/** Pick a sensible triangle budget from the current mesh size. */
+function recommendDecimateTarget(triangleCount: number): number {
+    if (triangleCount <= REMESH_COMFORT_TRIS)
+        return Math.max(8_000, Math.floor(triangleCount * 0.6));
+    if (triangleCount <= 80_000)
+        return 15_000;
+    if (triangleCount <= 200_000)
+        return 25_000;
+    if (triangleCount <= 600_000)
+        return 50_000;
+    if (triangleCount <= 2_000_000)
+        return 100_000;
+    return 250_000;
+}
+
+function decimateNeedLevel(triangleCount: number): "none" | "optional" | "recommended" | "required" {
+    if (triangleCount <= REMESH_COMFORT_TRIS)
+        return "none";
+    if (triangleCount <= REMESH_HEAVY_TRIS)
+        return "optional";
+    if (triangleCount <= 500_000)
+        return "recommended";
+    return "required";
+}
 
 function makeGeometry(vertices: Float32Array, indices: Uint32Array, normals?: Float32Array) {
     const geometry = new THREE.BufferGeometry();
@@ -178,14 +223,15 @@ export default function RemeshStudio() {
     const worker = useRef<Worker | null>(null);
     const request = useRef(0);
     const inputRef = useRef<HTMLInputElement | null>(null);
-    const [source, setSource] = useState<MeshData>(() => makeAdvancedEditorSphere());
-    const [label, setLabel] = useState("Sample UV sphere");
+    const [source, setSource] = useState<MeshData>(() => makeTorusKnotSample());
+    const [label, setLabel] = useState("Sample torus knot");
     const [result, setResult] = useState<RemeshResult | null>(null);
     const [target, setTarget] = useState(1000);
     const [adaptivity, setAdaptivity] = useState(0.5);
     const [modelType, setModelType] = useState<"organic" | "hardSurface">("organic");
     const [sharpEdgeThreshold, setSharpEdgeThreshold] = useState(90);
-    const [decimateTarget, setDecimateTarget] = useState(25000);
+    const [decimateTarget, setDecimateTarget] = useState(15_000);
+    const [lastDecimate, setLastDecimate] = useState<DecimatedResult | null>(null);
     const [viewResult, setViewResult] = useState(true);
     const [running, setRunning] = useState(false);
     const [busyAction, setBusyAction] = useState<"remesh" | "decimate" | null>(null);
@@ -193,6 +239,15 @@ export default function RemeshStudio() {
     const [status, setStatus] = useState("Ready");
     const [error, setError] = useState<string | null>(null);
     const inputTriangles = source.indices.length / 3;
+    const needLevel = decimateNeedLevel(inputTriangles);
+    const needsDecimate = inputTriangles > decimateTarget;
+    const recommendedTarget = useMemo(
+        () => recommendDecimateTarget(inputTriangles),
+        [inputTriangles]
+    );
+    const reductionPreview = needsDecimate
+        ? Math.max(0, Math.round((1 - decimateTarget / inputTriangles) * 100))
+        : 0;
 
     useEffect(() => {
         // Must be a module worker — remesh.worker.ts uses ESM imports.
@@ -206,12 +261,18 @@ export default function RemeshStudio() {
     }, []);
 
     const chooseSource = useCallback((mesh: MeshData, name: string, normalize = true) => {
-        setSource(normalize ? normalizeMesh(mesh) : mesh);
+        const next = normalize ? normalizeMesh(mesh) : mesh;
+        const tris = next.indices.length / 3;
+        setSource(next);
         setLabel(name);
         setResult(null);
+        setLastDecimate(null);
         setViewResult(false);
         setError(null);
         setStatus("Ready");
+        // Snap the budget to a sensible default for this mesh size.
+        if (tris > REMESH_COMFORT_TRIS)
+            setDecimateTarget(recommendDecimateTarget(tris));
     }, []);
 
     const upload = useCallback(async (file: File) => {
@@ -282,11 +343,12 @@ export default function RemeshStudio() {
             return;
         const id = ++request.current;
         const instance = worker.current;
+        const budget = Math.max(1_000, Math.floor(decimateTarget));
         setRunning(true);
         setBusyAction("decimate");
         setError(null);
         setProgress(0);
-        setStatus(`Preparing ${decimateTarget.toLocaleString()} polygon target…`);
+        setStatus(`Simplifying ${formatTris(inputTriangles)} → ${formatTris(budget)} tris…`);
 
         const receive = (event: MessageEvent<WorkerMessage>) => {
             if (event.data.id !== id)
@@ -307,12 +369,28 @@ export default function RemeshStudio() {
             if (event.data.type !== "decimated")
                 return;
             const { result: reduced } = event.data;
+            if (reduced.method === "none" || reduced.toTriangles >= reduced.fromTriangles) {
+                setError(
+                    `Could not reduce further (still ${reduced.toTriangles.toLocaleString()} tris). `
+                    + "Try a lower target, or remesh as-is if the mesh is already small."
+                );
+                setStatus("No reduction");
+                return;
+            }
             setSource(normalizeMesh({ vertices: reduced.vertices, indices: reduced.indices }));
-            setLabel((current) => `${current.replace(/ \(pre-decimated.*\)$/i, "")} (pre-decimated)`);
+            setLastDecimate(reduced);
+            const pct = Math.round((1 - reduced.toTriangles / reduced.fromTriangles) * 100);
+            setLabel((current) => {
+                const base = current.replace(/ \(pre-decimated.*\)$/i, "");
+                return `${base} (pre-decimated −${pct}%)`;
+            });
             setResult(null);
             setViewResult(false);
             setProgress(100);
-            setStatus(`${reduced.toTriangles.toLocaleString()} polygons ready for remesh (${reduced.method})`);
+            setStatus(
+                `${formatTris(reduced.fromTriangles)} → ${formatTris(reduced.toTriangles)} tris `
+                + `(−${pct}%, ${reduced.method}) — ready to remesh`
+            );
         };
         instance.addEventListener("message", receive);
         const vertices = source.vertices.slice();
@@ -322,7 +400,7 @@ export default function RemeshStudio() {
             type: "decimate",
             vertices,
             indices,
-            maxTriangles: Math.max(1000, Math.floor(decimateTarget)),
+            maxTriangles: budget,
         }, [vertices.buffer, indices.buffer]);
     }, [source, running, inputTriangles, decimateTarget]);
 
@@ -411,8 +489,24 @@ export default function RemeshStudio() {
 
             <aside className="w-full overflow-y-auto border-t border-white/10 bg-[#111113] p-5 md:w-[380px] md:border-l md:border-t-0">
                 <div className="mb-6">
-                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-violet-300">Remesh</p>
-                    <h1 className="mt-2 text-2xl font-semibold">Clean quad topology</h1>
+                    <div className="flex items-start justify-between gap-3">
+                        <div>
+                            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-violet-300">Remesh</p>
+                            <h1 className="mt-2 text-2xl font-semibold">Clean quad topology</h1>
+                        </div>
+                        <a
+                            href={GITHUB_REPO_URL}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-zinc-100 transition hover:border-white/20 hover:bg-white/10"
+                            title="View source on GitHub"
+                        >
+                            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor">
+                                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8" />
+                            </svg>
+                            GitHub
+                        </a>
+                    </div>
                     <p className="mt-2 text-sm leading-6 text-zinc-400">Browser demo for <code className="text-zinc-200">@autoremesher/wasm</code>. Upload a mesh, remesh in a Web Worker, inspect quads, download OBJ.</p>
                 </div>
 
@@ -455,19 +549,162 @@ export default function RemeshStudio() {
                         <span className="mt-1 block text-xs font-normal text-zinc-500">Corners sharper than this are treated as creases in hard-surface mode.</span>
                     </label>
 
-                    <div className="rounded-xl border border-amber-300/20 bg-amber-950/20 p-4">
-                        <div className="text-sm font-semibold text-amber-100">Pre-decimate large model</div>
-                        <p className="mt-1 text-xs leading-5 text-amber-100/60">Reduce million-polygon uploads in the worker before remeshing. This keeps the original shape while making the solver practical.</p>
-                        <label className="mt-3 block text-xs font-medium text-amber-50">
-                            Target triangles <span className="float-right text-amber-100/70">{decimateTarget.toLocaleString()}</span>
-                            <select className="mt-2 w-full rounded-lg border border-amber-200/20 bg-black/20 px-3 py-2 text-sm text-zinc-100" value={decimateTarget} onChange={(event) => setDecimateTarget(Number(event.target.value))} disabled={running}>
-                                {DECIMATE_PRESETS.map((preset) => <option key={preset} value={preset}>{preset.toLocaleString()} triangles (polygons)</option>)}
-                            </select>
-                        </label>
-                        <button className="mt-3 w-full rounded-lg border border-amber-200/25 px-3 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-100/10 disabled:cursor-not-allowed disabled:opacity-40" disabled={running || inputTriangles <= decimateTarget} onClick={preDecimate}>
-                            {busyAction === "decimate" ? `Reducing… ${progress}%` : inputTriangles <= decimateTarget ? "Already below target" : "Pre-decimate model"}
+                    <div
+                        className={`rounded-xl border p-4 ${
+                            needLevel === "required" || needLevel === "recommended"
+                                ? "border-amber-300/30 bg-amber-950/30"
+                                : needLevel === "optional"
+                                    ? "border-amber-300/15 bg-amber-950/15"
+                                    : "border-white/10 bg-white/[0.03]"
+                        }`}
+                    >
+                        <div className="flex items-start justify-between gap-2">
+                            <div>
+                                <div className="text-sm font-semibold text-zinc-100">Pre-decimate</div>
+                                <p className="mt-1 text-xs leading-5 text-zinc-400">
+                                    Edge-collapse simplify in a worker before remesh. Keeps silhouette; drops poly count so the quad solver stays fast.
+                                </p>
+                            </div>
+                            <span
+                                className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                                    needLevel === "required"
+                                        ? "bg-amber-400/20 text-amber-100"
+                                        : needLevel === "recommended"
+                                            ? "bg-amber-400/15 text-amber-200"
+                                            : needLevel === "optional"
+                                                ? "bg-white/10 text-zinc-300"
+                                                : "bg-emerald-500/15 text-emerald-200"
+                                }`}
+                            >
+                                {needLevel === "required"
+                                    ? "Needed"
+                                    : needLevel === "recommended"
+                                        ? "Recommended"
+                                        : needLevel === "optional"
+                                            ? "Optional"
+                                            : "OK as-is"}
+                            </span>
+                        </div>
+
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                            <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+                                <div className="text-[10px] uppercase tracking-wide text-zinc-500">Current</div>
+                                <div className="mt-0.5 font-semibold text-zinc-100">{formatTris(inputTriangles)} tris</div>
+                            </div>
+                            <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+                                <div className="text-[10px] uppercase tracking-wide text-zinc-500">After</div>
+                                <div className="mt-0.5 font-semibold text-zinc-100">
+                                    {needsDecimate
+                                        ? `~${formatTris(decimateTarget)} (−${reductionPreview}%)`
+                                        : "No change"}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="mt-3">
+                            <div className="mb-2 flex items-center justify-between text-xs">
+                                <span className="font-medium text-zinc-200">Target triangles</span>
+                                <span className="tabular-nums text-zinc-400">{decimateTarget.toLocaleString()}</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                                {DECIMATE_PRESETS.map((preset) => {
+                                    const tooHigh = preset.value >= inputTriangles;
+                                    const isActive = decimateTarget === preset.value;
+                                    const isRec = recommendedTarget === preset.value && needsDecimate;
+                                    return (
+                                        <button
+                                            key={preset.value}
+                                            type="button"
+                                            disabled={running || tooHigh}
+                                            onClick={() => setDecimateTarget(preset.value)}
+                                            title={tooHigh ? "Already at or below this count" : `${preset.hint}`}
+                                            className={`rounded-md border px-2.5 py-1.5 text-left text-[11px] transition disabled:cursor-not-allowed disabled:opacity-30 ${
+                                                isActive
+                                                    ? "border-amber-300/40 bg-amber-400/15 text-amber-50"
+                                                    : "border-white/10 bg-black/20 text-zinc-300 hover:border-white/20 hover:bg-white/5"
+                                            }`}
+                                        >
+                                            <span className="block font-semibold">{preset.label}</span>
+                                            <span className="block text-[10px] opacity-70">
+                                                {formatTris(preset.value)}
+                                                {isRec ? " · rec" : ""}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            <input
+                                className="mt-3 w-full accent-amber-400"
+                                type="range"
+                                min={5_000}
+                                max={Math.max(5_000, Math.min(500_000, Math.floor(inputTriangles * 0.95) || 5_000))}
+                                step={1_000}
+                                value={Math.min(decimateTarget, Math.max(5_000, inputTriangles - 1))}
+                                onChange={(event) => setDecimateTarget(Number(event.target.value))}
+                                disabled={running || inputTriangles <= 5_000}
+                            />
+                            <div className="mt-1 flex justify-between text-[10px] text-zinc-500">
+                                <span>5k</span>
+                                <button
+                                    type="button"
+                                    className="text-amber-200/80 underline-offset-2 hover:underline disabled:no-underline disabled:opacity-40"
+                                    disabled={running || !needsDecimate}
+                                    onClick={() => setDecimateTarget(recommendedTarget)}
+                                >
+                                    Use recommended ({formatTris(recommendedTarget)})
+                                </button>
+                                <span>dense</span>
+                            </div>
+                        </div>
+
+                        {busyAction === "decimate" && (
+                            <div className="mt-3">
+                                <div className="mb-1 flex justify-between text-[11px] text-amber-100/80">
+                                    <span>{status}</span>
+                                    <span className="tabular-nums">{progress}%</span>
+                                </div>
+                                <div className="h-1.5 overflow-hidden rounded-full bg-black/40">
+                                    <div
+                                        className="h-full rounded-full bg-amber-400 transition-[width] duration-150"
+                                        style={{ width: `${Math.min(100, progress)}%` }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        <button
+                            className="mt-3 w-full rounded-lg border border-amber-200/30 bg-amber-400/10 px-3 py-2.5 text-sm font-semibold text-amber-50 transition hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-40"
+                            disabled={running || !needsDecimate}
+                            onClick={preDecimate}
+                        >
+                            {busyAction === "decimate"
+                                ? `Reducing… ${progress}%`
+                                : !needsDecimate
+                                    ? "Already at or below target"
+                                    : `Reduce to ${formatTris(decimateTarget)} tris`}
                         </button>
-                        <p className="mt-2 text-[11px] text-amber-100/50">Current: {inputTriangles.toLocaleString()} triangles. The reduced mesh becomes the new remesh source.</p>
+
+                        {lastDecimate && lastDecimate.method !== "none" && (
+                            <p className="mt-2 text-[11px] leading-5 text-zinc-400">
+                                Last pass: {formatTris(lastDecimate.fromTriangles)} → {formatTris(lastDecimate.toTriangles)}{" "}
+                                via {lastDecimate.method === "meshopt" ? "meshoptimizer" : "grid fallback"}.
+                                This mesh is now the remesh source.
+                            </p>
+                        )}
+                        {!lastDecimate && needLevel !== "none" && (
+                            <p className="mt-2 text-[11px] leading-5 text-zinc-500">
+                                {needLevel === "required"
+                                    ? "This mesh is large — pre-decimate before remesh or it may be slow or fail."
+                                    : needLevel === "recommended"
+                                        ? "Pre-decimate for faster, more reliable remesh on heavy inputs."
+                                        : "Optional: lower density if remesh feels slow."}
+                            </p>
+                        )}
+                        {needLevel === "none" && (
+                            <p className="mt-2 text-[11px] leading-5 text-zinc-500">
+                                Mesh is already in a comfortable range for remesh. Pre-decimate only if you want fewer tris.
+                            </p>
+                        )}
                     </div>
 
                     <button className="w-full rounded-lg bg-white px-4 py-3 text-sm font-semibold text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-40" disabled={running} onClick={run}>
