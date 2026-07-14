@@ -195,7 +195,12 @@ export default function RemeshStudio() {
     const inputTriangles = source.indices.length / 3;
 
     useEffect(() => {
-        const instance = new Worker(new URL("./remesh.worker.ts", import.meta.url));
+        // Must be a module worker — remesh.worker.ts uses ESM imports.
+        // Without { type: "module" } the browser loads type=classic and throws
+        // "Cannot use import statement outside a module".
+        const instance = new Worker(new URL("./remesh.worker.ts", import.meta.url), {
+            type: "module",
+        });
         worker.current = instance;
         return () => instance.terminate();
     }, []);
