@@ -2,13 +2,38 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import type { Plugin } from "vite";
 import { defineConfig } from "vite";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(rootDir, "../..");
 
+/**
+ * Keep Emscripten glue's `import("node:…")` as real external imports.
+ * Without this, Vite rewrites them to unrelated app chunks (e.g. the
+ * remesh worker) and the WASM factory breaks in the browser.
+ */
+function externalizeNodeBuiltins(): Plugin {
+    return {
+        name: "externalize-node-builtins",
+        enforce: "pre",
+        resolveId(id) {
+            if (id.startsWith("node:"))
+                return { id, external: true };
+            return null;
+        },
+    };
+}
+
+const coopCoepHeaders = {
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Embedder-Policy": "require-corp",
+    // Same-origin WASM/workers under COEP.
+    "Cross-Origin-Resource-Policy": "same-origin",
+};
+
 export default defineConfig({
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), externalizeNodeBuiltins()],
     resolve: {
         alias: [
             // Short export form: @autoremesher/wasm/autoremesher.wasm → wasm/…
@@ -35,17 +60,18 @@ export default defineConfig({
     },
     worker: {
         format: "es",
+        plugins: () => [externalizeNodeBuiltins()],
     },
+    assetsInclude: ["**/*.wasm"],
     server: {
         fs: {
             // Allow importing WASM glue from the package root.
             allow: [packageRoot, rootDir],
         },
-        headers: {
-            // Not required for single-thread remesh; handy if you switch to pthreads.
-            "Cross-Origin-Opener-Policy": "same-origin",
-            "Cross-Origin-Embedder-Policy": "require-corp",
-        },
+        headers: coopCoepHeaders,
+    },
+    preview: {
+        headers: coopCoepHeaders,
     },
     optimizeDeps: {
         exclude: ["@autoremesher/wasm"],

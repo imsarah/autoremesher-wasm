@@ -4,6 +4,9 @@ import {
     remesh,
     type RemeshOptions,
 } from "@autoremesher/wasm";
+// Vite emits a real asset URL. Pass it into the remesher so Emscripten's
+// locateFile never invents a wrong/doubled path under the worker.
+import wasmUrl from "../../../wasm/autoremesher.wasm?url";
 
 interface RequestMessage {
     id: number;
@@ -12,6 +15,22 @@ interface RequestMessage {
     indices: Uint32Array;
     options?: Pick<RemeshOptions, "targetQuads" | "adaptivity" | "modelType" | "sharpEdgeThreshold">;
     maxTriangles?: number;
+}
+
+let wasmBinaryPromise: Promise<ArrayBuffer> | null = null;
+
+function loadWasmBinary(): Promise<ArrayBuffer> {
+    if (!wasmBinaryPromise) {
+        wasmBinaryPromise = fetch(wasmUrl).then(async (response) => {
+            if (!response.ok)
+                throw new Error(`Failed to fetch WASM (${response.status}): ${wasmUrl}`);
+            return response.arrayBuffer();
+        });
+        wasmBinaryPromise.catch(() => {
+            wasmBinaryPromise = null;
+        });
+    }
+    return wasmBinaryPromise;
 }
 
 self.onmessage = async (event: MessageEvent<RequestMessage>) => {
@@ -45,6 +64,10 @@ self.onmessage = async (event: MessageEvent<RequestMessage>) => {
 
         if (!options)
             throw new Error("Missing remesh options.");
+
+        self.postMessage({ id, type: "progress", progress: 0.02, status: "Loading WASM…" });
+        const wasmBinary = await loadWasmBinary();
+
         const result = await remesh(
             { vertices, indices },
             {
@@ -52,9 +75,19 @@ self.onmessage = async (event: MessageEvent<RequestMessage>) => {
                 edgeScaling: 1,
                 allowHoles: false,
                 maxParts: 1,
-                moduleOptions: { threads: false },
+                moduleOptions: {
+                    threads: false,
+                    wasmUrl,
+                    wasmBinary,
+                },
                 onProgress: (progress, status) =>
-                    self.postMessage({ id, type: "progress", progress, status }),
+                    self.postMessage({
+                        id,
+                        type: "progress",
+                        // Reserve 0–5% for asset load; map remesh onto 5–100%.
+                        progress: 0.05 + progress * 0.95,
+                        status,
+                    }),
             }
         );
         const transfer: Transferable[] = [
