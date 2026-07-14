@@ -10,12 +10,28 @@ const packageRoot = path.resolve(rootDir, "../..");
 export default defineConfig({
     plugins: [react(), tailwindcss()],
     resolve: {
-        alias: {
-            // Local package root (uses package.json "exports" → lib/esm + wasm).
-            "@autoremesher/wasm": packageRoot,
+        alias: [
+            // Short export form: @autoremesher/wasm/autoremesher.wasm → wasm/…
+            {
+                find: /^@autoremesher\/wasm\/(autoremesher(?:-mt)?\.(?:mjs|wasm))$/,
+                replacement: path.join(packageRoot, "wasm", "$1"),
+            },
+            // Long form must not become packageRoot/wasm/wasm/…
+            {
+                find: /^@autoremesher\/wasm\/wasm\/(.*)$/,
+                replacement: path.join(packageRoot, "wasm", "$1"),
+            },
+            // Package root (main entry / subpaths via package.json exports).
+            {
+                find: "@autoremesher/wasm",
+                replacement: packageRoot,
+            },
             // geometry.js imports meshoptimizer; resolve from this demo's install.
-            meshoptimizer: path.join(rootDir, "node_modules/meshoptimizer"),
-        },
+            {
+                find: "meshoptimizer",
+                replacement: path.join(rootDir, "node_modules/meshoptimizer"),
+            },
+        ],
     },
     worker: {
         format: "es",

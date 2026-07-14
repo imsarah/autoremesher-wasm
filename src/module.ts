@@ -100,9 +100,16 @@ async function instantiate(
     if (options.locateFile) {
         moduleArg.locateFile = options.locateFile;
     } else if (options.wasmUrl) {
+        // Always return the absolute asset URL for the .wasm; never join it
+        // with scriptDirectory/prefix (that doubles paths under Vite/webpack).
         const wasmUrl = options.wasmUrl;
-        moduleArg.locateFile = (path: string, prefix: string) =>
-            path.endsWith(".wasm") ? wasmUrl : prefix + path;
+        moduleArg.locateFile = (path: string, prefix: string) => {
+            if (path.endsWith(".wasm") || /\.wasm(?:\?|#|$)/.test(path))
+                return wasmUrl;
+            if (/^(?:[a-z]+:)?\/\//i.test(path) || path.startsWith("/") || path.startsWith("blob:") || path.startsWith("data:"))
+                return path;
+            return prefix + path;
+        };
     }
 
     return (await factory(moduleArg)) as AutoRemesherWasmModule;

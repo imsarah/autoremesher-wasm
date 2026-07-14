@@ -228,7 +228,7 @@ The binary ships next to its glue:
 Vite / webpack 5 usually resolve `new URL(..., import.meta.url)` inside the package. If assets are relocated:
 
 ```ts
-import wasmUrl from "@autoremesher/wasm/wasm/autoremesher.wasm?url"; // Vite
+import wasmUrl from "@autoremesher/wasm/autoremesher.wasm?url"; // Vite
 
 await remesh(input, {
   targetQuads: 2000,

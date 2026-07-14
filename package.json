@@ -42,6 +42,10 @@
       "import": "./lib/esm/three.js",
       "require": "./lib/cjs/three.js"
     },
+    "./autoremesher.mjs": "./wasm/autoremesher.mjs",
+    "./autoremesher.wasm": "./wasm/autoremesher.wasm",
+    "./autoremesher-mt.mjs": "./wasm/autoremesher-mt.mjs",
+    "./autoremesher-mt.wasm": "./wasm/autoremesher-mt.wasm",
     "./wasm/autoremesher.mjs": "./wasm/autoremesher.mjs",
     "./wasm/autoremesher.wasm": "./wasm/autoremesher.wasm",
     "./wasm/autoremesher-mt.mjs": "./wasm/autoremesher-mt.mjs",
